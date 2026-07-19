@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Wen.Property.Generator.Test/Wen.Property.Generator.Test.csproj" />
+  <Project Path="Wen.Property.Generator/Wen.Property.Generator.csproj" />
+</Solution>
