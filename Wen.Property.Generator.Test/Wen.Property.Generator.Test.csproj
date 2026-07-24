@@ -16,7 +16,10 @@
 	</PropertyGroup>
 
 	<ItemGroup>
+		<!-- 生成器作为 analyzer 引用 -->
 		<ProjectReference Include="..\Wen.Property.Generator\Wen.Property.Generator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+		<!-- Runtime 库提供 Attribute / 接口 / 工厂 / 扩展方法的运行时实现 -->
+		<ProjectReference Include="..\Wen.Property.Generator.Runtime\Wen.Property.Generator.Runtime.csproj" />
 	</ItemGroup>
 
 </Project>

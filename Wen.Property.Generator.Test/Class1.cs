@@ -1,7 +1,6 @@
 ﻿namespace Wen.Property.Generator.Test
 {
-    [WenGenerateAccessors]
-    public class Class1
+    public partial class Class1 : IWenPropertyAccessor
     {
         public string Name { get; set; } = string.Empty;
         public int Index { get; set; }

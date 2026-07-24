@@ -1,0 +1,23 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>netstandard2.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<LangVersion>latest</LangVersion>
+		<VersionPrefix>2.2.0</VersionPrefix>
+
+		<AssemblyName>Wen.Property.Generator.Runtime</AssemblyName>
+		<RootNamespace>Wen.Property.Generator</RootNamespace>
+
+		<Title>Wen.Property.Generator 运行时库</Title>
+		<Authors>Wenlin(5826985@qq.com)</Authors>
+		<Description>Wen.Property.Generator 的共享运行时基础设施，提供跨程序集的属性访问器工厂与缓存。</Description>
+
+		<!-- AOT 兼容性声明 -->
+		<IsAotCompatible>true</IsAotCompatible>
+
+		<!-- NuGet 打包配置 -->
+		<GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+	</PropertyGroup>
+
+</Project>
