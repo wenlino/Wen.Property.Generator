@@ -1,7 +1,9 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
-		<TargetFramework>netstandard2.0</TargetFramework>
+		<!-- netstandard2.0 必须保留：源生成器（Roslyn analyzer）只能加载 netstandard2.0 资产；
+		     net8.0/net10.0 供 AOT 友好的消费方使用 -->
+		<TargetFrameworks>netstandard2.0;net8.0;net10.0</TargetFrameworks>
 		<Nullable>enable</Nullable>
 		<LangVersion>latest</LangVersion>
 		<VersionPrefix>2.2.0</VersionPrefix>
@@ -13,8 +15,8 @@
 		<Authors>Wenlin(5826985@qq.com)</Authors>
 		<Description>Wen.Property.Generator 的共享运行时基础设施，提供跨程序集的属性访问器工厂与缓存。</Description>
 
-		<!-- AOT 兼容性声明 -->
-		<IsAotCompatible>true</IsAotCompatible>
+		<!-- AOT 兼容性声明：仅 net8.0+ 目标声明（netstandard2.0 目标不支持 AOT 分析） -->
+		<IsAotCompatible Condition="'$(TargetFramework)' != 'netstandard2.0'">true</IsAotCompatible>
 
 		<!-- NuGet 打包配置 -->
 		<GeneratePackageOnBuild>true</GeneratePackageOnBuild>
