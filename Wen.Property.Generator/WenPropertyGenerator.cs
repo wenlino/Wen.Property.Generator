@@ -4,6 +4,7 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Text;
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
 using System.Text;
 
@@ -14,7 +15,7 @@ public sealed class WenPropertyGenerator : IIncrementalGenerator
 {
     private const string InterfaceFullName = "Wen.Property.Generator.IWenPropertyAccessor";
     private const string AttributeFullName = "Wen.Property.Generator.WenPropertiesAttribute";
-    private const string ChannelFullName = "WenMewUI.Extensions.PropertyChannel";
+    private const string ChannelFullName = "Wen.Property.Generator.PropertyChannel";
 
     // 全限定 + 保留可空引用标注：通道泛参要跟模型属性声明的可空性一致。
     private static readonly SymbolDisplayFormat ChannelTypeFormat =
@@ -33,7 +34,7 @@ public sealed class WenPropertyGenerator : IIncrementalGenerator
     private static readonly DiagnosticDescriptor MissingChannelRule = new DiagnosticDescriptor(
         id: "WENPROP002",
         title: "找不到属性通道类型",
-        messageFormat: "本编译单元里找不到 '{0}'，通道表无处可生成。请引用提供该类型的控件库后再声明 [WenProperties]。",
+        messageFormat: "本编译单元里找不到 '{0}'，通道表无处可生成。请引用提供该类型的 Wen.Property.Generator.Runtime 包后再声明 [WenProperties]。",
         category: "WenPropertyGenerator",
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
@@ -53,6 +54,32 @@ public sealed class WenPropertyGenerator : IIncrementalGenerator
         category: "WenPropertyGenerator",
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor BadCarrierRule = new DiagnosticDescriptor(
+        id: "WENPROP005",
+        title: "通道表的载体类不合用",
+        messageFormat: "载体类 '{0}' 收不下通道表：{1}",
+        category: "WenPropertyGenerator",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    // 通道表的落点：一个挂在载体类上的 [WenProperties(…)] 请求对应一张表。
+    // 表恒在载体类里嵌一段与行模型同名的静态类，调用点写 载体类.行模型.属性名。
+    private readonly struct ChannelTableRequest
+    {
+        public ChannelTableRequest(INamedTypeSymbol? target, INamedTypeSymbol carrier, string carrierKeyword, string? carrierProblem)
+        {
+            Target = target;
+            Carrier = carrier;
+            CarrierKeyword = carrierKeyword;
+            CarrierProblem = carrierProblem;
+        }
+
+        public INamedTypeSymbol? Target { get; }
+        public INamedTypeSymbol Carrier { get; }
+        public string CarrierKeyword { get; }
+        public string? CarrierProblem { get; }
+    }
 
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
@@ -82,86 +109,124 @@ public sealed class WenPropertyGenerator : IIncrementalGenerator
             }
         });
 
-        // 第二条管道：[assembly: WenProperties(typeof(X), …)] 点名的类型出通道表。
-        // 走 CompilationProvider 而不是扫语法树——声明在程序集上，且要顺带确认通道类型可达。
-        var channelRequests = context.CompilationProvider
-            .Select(static (comp, _) => CollectChannelTargets(comp));
+        // 第二条管道：载体类点名的行模型出通道表。
+        // 通道类型可达与否要问编译本身（WENPROP002），所以左边带一个布尔量进来。
+        var declaredTables = context.SyntaxProvider.ForAttributeWithMetadataName(
+                AttributeFullName,
+                predicate: static (node, _) => node is ClassDeclarationSyntax or RecordDeclarationSyntax,
+                transform: static (ctx, _) => DeclaredTables(ctx))
+            .Where(static items => !items.IsEmpty)
+            .Collect();
 
-        context.RegisterSourceOutput(channelRequests, static (spc, req) =>
+        var channelMissing = context.CompilationProvider
+            .Select(static (comp, _) => comp.GetTypeByMetadataName(ChannelFullName + "`2") is null);
+
+        var channelRequests = channelMissing.Combine(declaredTables);
+
+        context.RegisterSourceOutput(channelRequests, static (spc, pair) =>
         {
-            if (req.Targets.Length == 0) return;
+            var declared = pair.Right;
+            if (declared.IsEmpty) return;
 
-            if (req.ChannelMissing)
+            if (pair.Left)
             {
                 spc.ReportDiagnostic(Diagnostic.Create(MissingChannelRule, Location.None, ChannelFullName));
                 return;
             }
 
+            // 同一个载体类把同一个行模型点两遍只出一张表；点两个不同模型是两张，各自嵌一段。
             var seen = new HashSet<string>();
-            foreach (var target in req.Targets)
-            {
-                if (target is null) continue;
-                if (!seen.Add(target.ToDisplayString())) continue;
-                GenerateChannelTable(spc, target);
-            }
+            var reportedCarriers = new HashSet<string>();
+            foreach (var group in declared)
+                foreach (var table in group)
+                    EmitChannelTable(spc, table, seen, reportedCarriers);
         });
     }
 
-    private readonly struct ChannelRequest
+    private static void EmitChannelTable(SourceProductionContext context, ChannelTableRequest table,
+        HashSet<string> seen, HashSet<string> reportedCarriers)
     {
-        public ChannelRequest(INamedTypeSymbol?[] targets, bool channelMissing)
+        if (table.CarrierProblem is not null)
         {
-            Targets = targets;
-            ChannelMissing = channelMissing;
+            // 一个载体类只报一次：它点名两行模型时两条请求共用同一个毛病。
+            if (reportedCarriers.Add(table.Carrier.ToDisplayString()))
+                context.ReportDiagnostic(Diagnostic.Create(BadCarrierRule, table.Carrier.Locations.FirstOrDefault(),
+                    table.Carrier.Name, table.CarrierProblem));
+            return;
         }
 
-        public INamedTypeSymbol?[] Targets { get; }
-        public bool ChannelMissing { get; }
+        if (table.Target is null) return;
+        string ownerKey = table.Carrier.ToDisplayString() + "→" + table.Target.ToDisplayString();
+        if (!seen.Add(ownerKey)) return;
+        GenerateChannelTable(context, table);
     }
 
-    private static ChannelRequest CollectChannelTargets(Compilation comp)
+    // 类级 [WenProperties(typeof(X), typeof(Y))]：每个点名的行模型在载体类里嵌一段同名静态类，
+    // 调用点写 载体类.行模型.属性名——两个模型撞同一个属性名也各自有段落，不会挤进同一层。
+    // 载体类要 partial（分段得塞进它的分部声明）、不能点自己（嵌套类不许与外层类型同名）。
+    private static ImmutableArray<ChannelTableRequest> DeclaredTables(GeneratorAttributeSyntaxContext context)
     {
-        var attr = comp.GetTypeByMetadataName(AttributeFullName);
-        if (attr is null) return new ChannelRequest(Array.Empty<INamedTypeSymbol?>(), false);
+        if (context.TargetSymbol is not INamedTypeSymbol carrier) return ImmutableArray<ChannelTableRequest>.Empty;
 
-        var channelMissing = comp.GetTypeByMetadataName(ChannelFullName + "`2") is null;
-
-        var targets = new List<INamedTypeSymbol?>();
-        foreach (var applied in comp.Assembly.GetAttributes())
-        {
-            if (!SymbolEqualityComparer.Default.Equals(applied.AttributeClass, attr)) continue;
+        var targets = new List<INamedTypeSymbol>();
+        foreach (var applied in context.Attributes)
             foreach (var argument in applied.ConstructorArguments)
                 CollectTypes(argument, targets);
+
+        string keyword = carrier.IsRecord ? "record" : "class";
+        if (targets.Count == 0)
+        {
+            return ImmutableArray.Create(new ChannelTableRequest(null, carrier, keyword,
+                "没点名行模型。挂在类上得给它点名要建表的行模型类型。"));
         }
 
-        return new ChannelRequest(targets.ToArray(), channelMissing);
+        string? problem = null;
+        if (targets.Any(target => SymbolEqualityComparer.Default.Equals(target, carrier)))
+            problem = "点名的就是它自己：嵌进去的静态分段要和外层类型同名，编译器不认（CS0542）。";
+        else if (!IsPartialDeclaration(context.TargetNode)) problem = "不是 partial 声明，通道分段挂不进去；补上 partial 关键字。";
+        else if (carrier.IsGenericType) problem = "是泛型类型，通道表要落在闭合类型上。";
+        else if (carrier.ContainingType is not null) problem = "是嵌套类型，分部声明得连着外层类型一起写。";
+        else
+        {
+            // 分段名取类型名（不含命名空间）：两个同名模型点进同一个载体类，嵌的两段还是同名，会撞成 CS0102。
+            var segments = new HashSet<string>();
+            foreach (var target in targets)
+                if (!segments.Add(target.Name))
+                    problem = "点名的行模型里有同名类型（分属不同命名空间），嵌套分段会撞在载体类上；把它们分到两个载体类。";
+        }
+
+        var tables = new List<ChannelTableRequest>(targets.Count);
+        foreach (var target in targets)
+            tables.Add(new ChannelTableRequest(target, carrier, keyword, problem));
+        return [.. tables];
     }
+
+    // partial 只在语法上看得到，符号上没有对应属性。
+    private static bool IsPartialDeclaration(SyntaxNode node)
+        => node is TypeDeclarationSyntax declaration && declaration.Modifiers.Any(SyntaxKind.PartialKeyword);
 
     // params Type[] 交回来是一个数组常量：数组走 Values，单个 Type 实参才是 Value。
     // 直接读数组常量的 Value 会抛 InvalidOperationException。
-    private static void CollectTypes(TypedConstant argument, List<INamedTypeSymbol?> targets)
+    // 不合用的类型（值类型、泛型）照原样收下来，到生成那趟再报 WENPROP004，别在这儿静默丢掉。
+    private static void CollectTypes(TypedConstant argument, List<INamedTypeSymbol> targets)
     {
         if (argument.Kind == TypedConstantKind.Array)
         {
             foreach (var item in argument.Values)
-                if (item.Value is INamedTypeSymbol inner)
-                    targets.Add(CheckTarget(inner));
+                if (item.Value is INamedTypeSymbol inner) targets.Add(inner);
             return;
         }
 
-        if (argument.Value is INamedTypeSymbol named)
-            targets.Add(CheckTarget(named));
+        if (argument.Value is INamedTypeSymbol named) targets.Add(named);
     }
 
-    private static INamedTypeSymbol? CheckTarget(INamedTypeSymbol symbol)
+    // 生成通道表：一条属性一条通道，读写都是编译期绑好的委托。
+    // 载体类里嵌一段与行模型同名的静态类，调用点写 载体类.行模型.属性名。
+    private static void GenerateChannelTable(SourceProductionContext context, ChannelTableRequest table)
     {
-        if (symbol.TypeKind != TypeKind.Class) return null;
-        return symbol;
-    }
+        var symbol = table.Target!;
+        var carrier = table.Carrier;
 
-    // 生成 {类型}Channels：一条属性一条通道，读写都是编译期绑好的委托。
-    private static void GenerateChannelTable(SourceProductionContext context, INamedTypeSymbol symbol)
-    {
         // 泛型类无从点名闭合类型；嵌套类的表要落在外层类型名下，命名空间那条取不到，都不合用。
         if (symbol.TypeKind != TypeKind.Class || symbol.IsGenericType || symbol.ContainingType is not null)
         {
@@ -187,20 +252,22 @@ public sealed class WenPropertyGenerator : IIncrementalGenerator
         }
 
         var itemType = symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-        string name = symbol.Name;
-        string ns = symbol.ContainingNamespace.IsGlobalNamespace
+        string ownerName = carrier.Name;
+        string ns = carrier.ContainingNamespace.IsGlobalNamespace
             ? string.Empty
-            : symbol.ContainingNamespace.ToDisplayString();
-        string accessibility = symbol.DeclaredAccessibility == Accessibility.Public ? "public" : "internal";
+            : carrier.ContainingNamespace.ToDisplayString();
+        string accessibility = carrier.DeclaredAccessibility == Accessibility.Public ? "public" : "internal";
         bool hasNamespace = ns.Length > 0;
         string indent = hasNamespace ? "    " : string.Empty;
+        string body = indent + "    ";       // 嵌一段之后的成员缩进层
+        string hintName = $"{ownerName}_{symbol.Name}_Channels.g.cs";
 
         var sb = new StringBuilder();
         sb.AppendLine("// <auto-generated/>");
         sb.AppendLine("#nullable enable");
         sb.AppendLine();
-        sb.AppendLine("// 由 Wen.Property.Generator 按 [assembly: WenProperties(…)] 生成。");
-        sb.AppendLine("// 行模型本身不用改：这一张表带的就是它的读写委托与列头。");
+        sb.AppendLine($"// 由 Wen.Property.Generator 按挂在 {carrier.Name} 上的 [WenProperties(typeof({symbol.Name}))] 生成。");
+        sb.AppendLine("// 行模型本身不用改：这一段带的就是它的读写委托与列头。");
         sb.AppendLine();
 
         if (hasNamespace)
@@ -209,25 +276,28 @@ public sealed class WenPropertyGenerator : IIncrementalGenerator
             sb.AppendLine("{");
         }
 
-        sb.AppendLine($"{indent}/// <summary>{name} 的属性通道表（生成）。</summary>");
-        sb.AppendLine($"{indent}{accessibility} static class {name}Channels");
+        sb.AppendLine($"{indent}{accessibility} partial {table.CarrierKeyword} {ownerName}");
         sb.AppendLine($"{indent}{{");
+        sb.AppendLine($"{indent}    /// <summary>{symbol.Name} 的属性通道（生成，调用点写 {ownerName}.{symbol.Name}.属性名）。</summary>");
+        sb.AppendLine($"{indent}    public static class {symbol.Name}");
+        sb.AppendLine($"{indent}    {{");
         foreach (var prop in properties)
         {
             // 带可空标注：模型写成 string? 时通道也得是 PropertyChannel<T, string?>，
             // 否则生成的 Get 委托会从可空属性返回非空值，编译期报 CS8603。
             string propType = prop.Type.ToDisplayString(ChannelTypeFormat);
-            sb.AppendLine($"{indent}    /// <summary>{prop.Name} 的通道。</summary>");
-            sb.AppendLine($"{indent}    public static global::{ChannelFullName}<{itemType}, {propType}> {prop.Name} {{ get; }} = new()");
-            sb.AppendLine($"{indent}    {{");
-            sb.AppendLine($"{indent}        Name = nameof({itemType}.{prop.Name}),");
-            sb.AppendLine($"{indent}        Header = {Literal(DisplayName(prop))},");
-            sb.AppendLine($"{indent}        Get = static it => it.{prop.Name},");
+            sb.AppendLine($"{body}    /// <summary>{prop.Name} 的通道。</summary>");
+            sb.AppendLine($"{body}    public static global::{ChannelFullName}<{itemType}, {propType}> {prop.Name} {{ get; }} = new()");
+            sb.AppendLine($"{body}    {{");
+            sb.AppendLine($"{body}        Name = nameof({itemType}.{prop.Name}),");
+            sb.AppendLine($"{body}        Header = {Literal(DisplayName(prop))},");
+            sb.AppendLine($"{body}        Get = static it => it.{prop.Name},");
             if (!prop.IsReadOnly)
-                sb.AppendLine($"{indent}        Set = static (it, value) => it.{prop.Name} = value,");
-            sb.AppendLine($"{indent}    }};");
+                sb.AppendLine($"{body}        Set = static (it, value) => it.{prop.Name} = value,");
+            sb.AppendLine($"{body}    }};");
             sb.AppendLine();
         }
+        sb.AppendLine($"{indent}    }}");
         sb.AppendLine($"{indent}}}");
 
         if (hasNamespace)
@@ -235,7 +305,7 @@ public sealed class WenPropertyGenerator : IIncrementalGenerator
             sb.AppendLine("}");
         }
 
-        context.AddSource($"{name}_Channels.g.cs", SourceText.From(sb.ToString(), Encoding.UTF8));
+        context.AddSource(hintName, SourceText.From(sb.ToString(), Encoding.UTF8));
     }
 
     // 列头取 DisplayName，没有就取属性名：模型不带标记也能生成，只是表头是英文属性名。

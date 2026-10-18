@@ -3,7 +3,8 @@
 一个基于 **C# Roslyn 增量源生成器** 的零反射属性访问库。通过编译期代码生成，为属性读写产出强类型委托，
 **无需反射、AOT 友好、零运行时开销**。两种触发方式各管一头：
 
-- `[assembly: WenProperties(typeof(X), …)]` → 产出 `{X}Channels` 属性通道表，**目标类不用改一个字**（2.3.0 起，界面用这套）
+- `[WenProperties(typeof(X), …)]` 挂在载体类上 → 每个点名的行模型在载体类里嵌一段与它同名的静态类，
+  调用点写 `载体类.行模型.属性名`，**行模型本身不用改一个字**（界面用这套）
 - 类实现 `IWenPropertyAccessor` → 产出按名字读写的接口实现（老触发保留，业务仓仍在用）
 
 ## 特性
@@ -20,7 +21,7 @@
 ```
 Wen.Property.Generator.slnx
 ├── Wen.Property.Generator/          # 源生成器（netstandard2.0, Roslyn Analyzer）
-├── Wen.Property.Generator.Runtime/  # 运行时接口库（IWenPropertyAccessor）
+├── Wen.Property.Generator.Runtime/  # 运行时库（IWenPropertyAccessor、PropertyChannel）
 └── Wen.Property.Generator.Test/     # 示例 / 测试项目
 ```
 
@@ -74,7 +75,7 @@ Type t = obj.GetPropertyType("CreatedAt");    // typeof(DateTime)
 obj.SetPropertyValue("Remark", "x");          // throws!
 ```
 
-## 属性通道表（2.3.0 起，推荐给界面用）
+## 属性通道表（推荐给界面用）
 
 上面那套 `IWenPropertyAccessor` 走的是"按名字查成员"，运行时要一次字符串比较，且要求模型 `partial` + 实现接口。
 界面侧（表格列、表单绑定）不需要这个：它只要一对编译期绑好的读写委托。
@@ -82,8 +83,9 @@ obj.SetPropertyValue("Remark", "x");          // throws!
 把类型点名叫出来，模型本身一个字都不用改：
 
 ```csharp
-// 挂在程序集上，不进模型类
-[assembly: WenProperties(typeof(StockRow))]
+// 载体类：一个模块一张表，点名的每个行模型在表里嵌一段
+[WenProperties(typeof(StockRow), typeof(WorkOrder))]
+public partial class Master;               // 空壳，只负责挂特性
 
 public class StockRow                      // 不是 partial，不实现接口，不带标记
 {
@@ -94,10 +96,10 @@ public class StockRow                      // 不是 partial，不实现接口�
 }
 ```
 
-生成 `StockRowChannels`（与模型同命名空间、同可见性）：
+生成 `Master.StockRow`（与载体类同命名空间、同可见性），每条属性一条通道：
 
 ```csharp
-public static global::WenMewUI.Extensions.PropertyChannel<StockRow, int> Count { get; } = new()
+public static global::Wen.Property.Generator.PropertyChannel<StockRow, int> Count { get; } = new()
 {
     Name = nameof(StockRow.Count),
     Header = "Count",                      // 有 [DisplayName] 取它，没有就取属性名
@@ -107,19 +109,42 @@ public static global::WenMewUI.Extensions.PropertyChannel<StockRow, int> Count {
 ```
 
 委托是 `ldftn` + `newobj`，链接期就绑死了，运行时不查成员名，AOT / trimming 下没有反射路径。
-消费现场见 WenMewUI 仓的 `WenMewUI/Extensions/PropertyChannel.cs` 与表格列构建器。
+
+通道类型 `PropertyChannel{TItem, TValue}` 就住在这个 Runtime 包里，只有数据（名字、列头、两个委托、类型读数），
+**不认任何界面栈**——业务程序集为声明一张通道表只需要引生成器包，不用把控件库拖进来。
+"值变了怎么通知界面"那一半（按行配槽的 `SlotFor` / `Sync`）住在界面侧，
+消费现场见 WenMewUI 仓的 `WenMewUI/Extensions/PropertyChannelSlots.cs` 与表格列构建器。
+
+### 调用点
+
+```csharp
+.AddColumn(Master.StockRow.Count)          // 表头取 DisplayName，没有就取属性名
+.AddColumn(Master.StockRow.Count, header: "数量")
+```
+
+分段按**行模型类型名**切，所以两个模型撞同一个属性名也各归各段：`Master.StockRow.Name` 与
+`Master.WorkOrder.Name` 是两条互不相干的通道，各自的按行配槽与对账都独立走。
+
+载体类这几条要成立，否则报 `WENPROP005`：
+
+- 是 `partial`（生成的分段要塞进它的分部声明里）；
+- 点名的行模型之间**类型名不重名**（分属不同命名空间的同名类型会撞在同一个分段名上，拆成两个载体类）；
+- 点的不是它自己（嵌套分段要与外层类型同名，编译器不认 CS0542；给模型自己建表，另起一个载体类点名它）；
+- 载体类非泛型、非嵌套。
 
 > 中文列头要么在属性上挂 `[DisplayName]`，要么在调用点写 `header:`。
 > 只想给一列起中文头、又不愿给模型加标记时，手写这张表也可以——两张表形状一致，可以混用。
+> 一次性列还可以不建表：`AddColumn("数量", r => r.Count, (r, v) => r.Count = v)`，构建器当场包成匿名通道。
 
 ## 诊断
 
 | 编号 | 级别 | 触发条件 |
 |------|------|----------|
 | WENPROP001 | Error | 实现 `IWenPropertyAccessor` 的类没写 `partial` |
-| WENPROP002 | Error | `[WenProperties]` 点名了类型，但本编译单元里找不到 `WenMewUI.Extensions.PropertyChannel<TItem, TValue>` |
+| WENPROP002 | Error | 载体类点名了行模型，但本编译单元里找不到 `Wen.Property.Generator.PropertyChannel<TItem, TValue>`（没引到 Runtime 包，或目标框架早于 net8.0） |
 | WENPROP003 | Warning | 点名的类型没有任何可生成的公共实例属性，通道表为空 |
-| WENPROP004 | Error | 点名的类型不合用（非类、泛型类） |
+| WENPROP004 | Error | 点名的类型不合用（非类、泛型类、嵌套类） |
+| WENPROP005 | Error | 载体类收不下通道表（非 `partial`、点了重名类型、点的是自己、泛型或嵌套、没点名） |
 
 ## IWenPropertyAccessor 接口
 
@@ -139,17 +164,18 @@ public interface IWenPropertyAccessor
 
 ## 生成规则
 
-### 通道表（`[assembly: WenProperties(…)]`）
+### 通道表（载体类上的 `[WenProperties(…)]`）
 
 | 条件 | 说明 |
 |------|------|
-| 目标须为非泛型、非嵌套的类 | 不合用报 `WENPROP004`；结构体等不进点名单 |
-| 找不到 `PropertyChannel{TItem, TValue}` | 报 `WENPROP002`，通道表无处可生成 |
+| 目标须为非泛型、非嵌套的类 | 不合用报 `WENPROP004`（结构体、泛型类、嵌套类都会点名报错） |
+| 找不到 `PropertyChannel{TItem, TValue}` | 报 `WENPROP002`，通道表无处可生成（Runtime 包没引到，或目标框架早于 net8.0） |
 | 没有任何公共实例属性 | 报 `WENPROP003` 警告，不产出空表 |
 | 仅包含 `public` 实例属性 | 静态属性、索引器、显式接口实现均被排除 |
 | 可空引用标注 | `string?` 会原样带进泛型参数，生成的委托不会报 CS8603 |
 | 只读属性 | 通道只给 `Get`，`IsReadOnly` 为真，界面据此不挂编辑器 |
 | 列头 | 属性上有 `[DisplayName]` 取它，没有则取属性名 |
+| 落点 | 每个目标一个分部片段：载体类里嵌一段与目标同名的静态类，一个载体点几个模型就出几段 |
 
 ### 接口实现（`IWenPropertyAccessor`）
 

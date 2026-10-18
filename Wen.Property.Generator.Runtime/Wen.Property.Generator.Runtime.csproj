@@ -6,14 +6,14 @@
 		<TargetFrameworks>netstandard2.0;net8.0;net10.0</TargetFrameworks>
 		<Nullable>enable</Nullable>
 		<LangVersion>latest</LangVersion>
-		<VersionPrefix>2.3.0</VersionPrefix>
+		<VersionPrefix>2.5.0</VersionPrefix>
 
 		<AssemblyName>Wen.Property.Generator.Runtime</AssemblyName>
 		<RootNamespace>Wen.Property.Generator</RootNamespace>
 
 		<Title>Wen.Property.Generator 运行时库</Title>
 		<Authors>Wenlin(5826985@qq.com)</Authors>
-		<Description>Wen.Property.Generator 的共享运行时基础设施，提供跨程序集的属性访问器工厂与缓存。</Description>
+		<Description>Wen.Property.Generator 的共享运行时基础设施：跨程序集的属性访问器工厂与缓存，以及不认界面栈的属性读写通道（PropertyChannel）。</Description>
 
 		<!-- AOT 兼容性声明：仅 net8.0+ 目标声明（netstandard2.0 目标不支持 AOT 分析） -->
 		<IsAotCompatible Condition="'$(TargetFramework)' != 'netstandard2.0'">true</IsAotCompatible>

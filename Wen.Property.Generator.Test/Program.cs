@@ -21,9 +21,6 @@ Console.WriteLine($"[泛型] Index = {idx}");
 c1.SetPropertyValue<string>(nameof(Class1.Name), "new name");
 Console.WriteLine($"[泛型 set] Name = {c1.Name}");
 
-// 全能力：属性名枚举
-Console.WriteLine($"[PropertyNames] {string.Join(", ", c1.PropertyNames)}");
-
 // 全能力：ContainsProperty
 Console.WriteLine($"[Contains] Value = {c1.ContainsProperty(nameof(Class1.Value))}");
 Console.WriteLine($"[Contains] NotExist = {c1.ContainsProperty("NotExist")}");
