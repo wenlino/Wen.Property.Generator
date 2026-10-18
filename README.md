@@ -1,6 +1,10 @@
 # Wen.Property.Generator
 
-一个基于 **C# Roslyn 增量源生成器** 的零反射属性访问库。通过编译期代码生成，为实现了 `IWenPropertyAccessor` 接口的类自动生成强类型属性读写实现，**无需反射、AOT 友好、零运行时开销**。
+一个基于 **C# Roslyn 增量源生成器** 的零反射属性访问库。通过编译期代码生成，为属性读写产出强类型委托，
+**无需反射、AOT 友好、零运行时开销**。两种触发方式各管一头：
+
+- `[assembly: WenProperties(typeof(X), …)]` → 产出 `{X}Channels` 属性通道表，**目标类不用改一个字**（2.3.0 起，界面用这套）
+- 类实现 `IWenPropertyAccessor` → 产出按名字读写的接口实现（老触发保留，业务仓仍在用）
 
 ## 特性
 
@@ -70,7 +74,56 @@ Type t = obj.GetPropertyType("CreatedAt");    // typeof(DateTime)
 obj.SetPropertyValue("Remark", "x");          // throws!
 ```
 
+## 属性通道表（2.3.0 起，推荐给界面用）
+
+上面那套 `IWenPropertyAccessor` 走的是"按名字查成员"，运行时要一次字符串比较，且要求模型 `partial` + 实现接口。
+界面侧（表格列、表单绑定）不需要这个：它只要一对编译期绑好的读写委托。
+
+把类型点名叫出来，模型本身一个字都不用改：
+
+```csharp
+// 挂在程序集上，不进模型类
+[assembly: WenProperties(typeof(StockRow))]
+
+public class StockRow                      // 不是 partial，不实现接口，不带标记
+{
+    public string Name { get; set; } = string.Empty;
+    public int Count { get; set; }
+    public string? Note { get; set; }      // 可空标注会跟着进通道泛型参数
+    public decimal Amount { get; }         // 只读属性 → 通道不带 Set
+}
+```
+
+生成 `StockRowChannels`（与模型同命名空间、同可见性）：
+
+```csharp
+public static global::WenMewUI.Extensions.PropertyChannel<StockRow, int> Count { get; } = new()
+{
+    Name = nameof(StockRow.Count),
+    Header = "Count",                      // 有 [DisplayName] 取它，没有就取属性名
+    Get = static it => it.Count,
+    Set = static (it, value) => it.Count = value,
+};
+```
+
+委托是 `ldftn` + `newobj`，链接期就绑死了，运行时不查成员名，AOT / trimming 下没有反射路径。
+消费现场见 WenMewUI 仓的 `WenMewUI/Extensions/PropertyChannel.cs` 与表格列构建器。
+
+> 中文列头要么在属性上挂 `[DisplayName]`，要么在调用点写 `header:`。
+> 只想给一列起中文头、又不愿给模型加标记时，手写这张表也可以——两张表形状一致，可以混用。
+
+## 诊断
+
+| 编号 | 级别 | 触发条件 |
+|------|------|----------|
+| WENPROP001 | Error | 实现 `IWenPropertyAccessor` 的类没写 `partial` |
+| WENPROP002 | Error | `[WenProperties]` 点名了类型，但本编译单元里找不到 `WenMewUI.Extensions.PropertyChannel<TItem, TValue>` |
+| WENPROP003 | Warning | 点名的类型没有任何可生成的公共实例属性，通道表为空 |
+| WENPROP004 | Error | 点名的类型不合用（非类、泛型类） |
+
 ## IWenPropertyAccessor 接口
+
+按名字查成员的旧触发方式，供其他业务仓继续使用，与通道表互不影响。
 
 ```csharp
 public interface IWenPropertyAccessor
@@ -85,6 +138,20 @@ public interface IWenPropertyAccessor
 ```
 
 ## 生成规则
+
+### 通道表（`[assembly: WenProperties(…)]`）
+
+| 条件 | 说明 |
+|------|------|
+| 目标须为非泛型、非嵌套的类 | 不合用报 `WENPROP004`；结构体等不进点名单 |
+| 找不到 `PropertyChannel{TItem, TValue}` | 报 `WENPROP002`，通道表无处可生成 |
+| 没有任何公共实例属性 | 报 `WENPROP003` 警告，不产出空表 |
+| 仅包含 `public` 实例属性 | 静态属性、索引器、显式接口实现均被排除 |
+| 可空引用标注 | `string?` 会原样带进泛型参数，生成的委托不会报 CS8603 |
+| 只读属性 | 通道只给 `Get`，`IsReadOnly` 为真，界面据此不挂编辑器 |
+| 列头 | 属性上有 `[DisplayName]` 取它，没有则取属性名 |
+
+### 接口实现（`IWenPropertyAccessor`）
 
 | 条件 | 说明 |
 |------|------|
